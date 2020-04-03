@@ -47,3 +47,5 @@ Yes it is: [Refer to Section 5](https://www.pluralsight.com/terms)
 How tragic! This script was written in half an hour for personal use, sorry if it isn't tested properly. You are free to open issues and pull requests.
 
 Otherwise, there is a similar project here made in python: https://github.com/Stormiix/pluralsight_scraper
+
+If you do want to debug here are some [tips](DEBUGGING.md)

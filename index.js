@@ -12,7 +12,7 @@ var user = {
 /*** DAH CODEZ ***/
 var ProgressBar = require('progress');
 var Nightmare = require('nightmare');
-var nightmare = Nightmare({ show: false });
+var nightmare = Nightmare({ show: process.env.SHOW_BROWSER === 'true' });
 
 var https = require('https');
 var fs = require("fs");
@@ -26,17 +26,83 @@ This scraper is open source and licensed under GPLv2 on Github
 https://github.com/knyzorg/pluralsight-scraper
 `)
 
+// Add a promise for indirect call to an goto (eg. from click()) so the remaining promise won't start before the DOM is ready
+//  (We try to replicate the goto() promise)
+Nightmare.prototype.willGenerateGoto = function(callback) {
+    var self = this
+
+    var executionContext = {}
+
+    // Safety to avoid waiting for a dom-ready if the click() actually didn't trigger anything
+    self.once('did-start-loading', function() {
+        executionContext.rejectError = new Error("Unable to generate the webpage within the time frame (DOM ready wasn't triggered)")
+    });
+
+    self.once('dom-ready', function() {
+        clearTimeout(executionContext.timer)
+        executionContext.done()
+    });
+
+    callback.call(this);
+    
+    this.invoke(function(done) {
+        executionContext.done = done
+        executionContext.rejectError = new Error("Expected a page load to be triggered but nothing happened.")
+        executionContext.timer = setTimeout(function() { done(executionContext.rejectError) }, self.options.gotoTimeout)
+    });
+
+    return this;
+}
+
+Nightmare.prototype.ensureValidHttpStatus = function(callback, args) {
+    this.once('did-get-response-details', function(event, status, newURL, originalURL, httpResponseCode) {
+        args = Object.assign({excludeHttpCodes: []}, args)
+
+        var excludeHttpCodes = args.excludeHttpCodes || []
+        if(httpResponseCode >= 400 && !excludeHttpCodes.includes(httpResponseCode)) {
+            throw new Error(`Unable to get the webpage, server returnede HTTP Code ${httpResponseCode}`)
+        }
+    });
+
+    callback.call(this);
+
+    return this;
+}
+
+Nightmare.action('invoke', function(callback, done) {
+    callback(done)
+});
+
+// Let's go 88mph Scott!
+if(process.env.NODE_ENV === "development") {
+    Nightmare.action('wait', function() {});
+}
+
 console.log("Logging in...")
 
 var numberOfFiles, completed, saveTo, progress = 0;
 nightmare
     .useragent(useragent)
-    .goto('https://app.pluralsight.com/id/')
+    .ensureValidHttpStatus(function() { this.goto('https://app.pluralsight.com/id?') })
     .insert('#Username', user.email)
     .insert('#Password', user.password)
-    .click('#login')
+    // The captcha may trigger a 403 http code and it will mess up with the captcha detection below
+    .willGenerateGoto(function() { this.ensureValidHttpStatus(function() { this.click('#login') }, { excludeHttpCodes: [ 403 ]})})
+    .evaluate(function () {
+        var errorMessage = document.getElementById('errorMessage');
+        if(errorMessage) {
+            throw new Error(`Unable to login: ${errorMessage.textContent}`)
+        }
+
+        var captch = document.getElementById('challenge-form');
+        if(captch) {
+            // We could avoid this error if process.env.SHOW_BROWSER is set but we would need to recheck if credentials are fine (executing this eveluate() again) before moving one.
+            // Captch will repost credentials upon success the challenge.
+            throw new Error(`Unable to login, you triggered a captch. Rerun this script with the environment variable SHOW_BROWSER=true`)
+        }
+    })
     .wait(1000)
-    .goto(target)
+    .ensureValidHttpStatus(function() { this.goto(target) })
     .wait(3000)
     .evaluate(function () {
         var courses = [];
@@ -54,7 +120,7 @@ nightmare
     .then(function (module) {
         numberOfFiles = module.courses.length;
         if (!numberOfFiles){
-            console.error("Wrong login credentials!")
+            console.error("Unable to detect courses. It could be because the course URL is invalid, because of too many login attempt, because the site has been updated but not this script so it isn't able to detect failed sign-in.")
             process.exit(1)
             return;
         }
@@ -69,12 +135,12 @@ nightmare
         ))
         require("async.parallellimit")(tasks, 1, function () {
         });
-    }).catch((e) => console.log(e))
+    }).catch((e) => console.error(`Unhandled error: ${e}`))
 
 function scrape(course, index, callback, delay=1500) {
     nightmare
         .useragent(useragent)
-        .goto(course.url)
+        .ensureValidHttpStatus(function() { this.goto(course.url) })
         .wait("video")
         .wait(1500)
         .evaluate(() => {
